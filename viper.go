@@ -23,18 +23,15 @@ import (
 	"bytes"
 	"fmt"
 	"io"
-	"log"
+	"io/ioutil"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"time"
 
-	"github.com/fsnotify/fsnotify"
 	"github.com/mitchellh/mapstructure"
-	"github.com/spf13/afero"
 	"github.com/spf13/cast"
-	jww "github.com/spf13/jwalterweatherman"
 	"github.com/spf13/pflag"
 )
 
@@ -44,40 +41,12 @@ func init() {
 	v = New()
 }
 
-type remoteConfigFactory interface {
-	Get(rp RemoteProvider) (io.Reader, error)
-	Watch(rp RemoteProvider) (io.Reader, error)
-}
-
-// RemoteConfig is optional, see the remote package
-var RemoteConfig remoteConfigFactory
-
-// Denotes encountering an unsupported
-// configuration filetype.
+// Denotes encountering an unsupported configuration filetype.
 type UnsupportedConfigError string
 
 // Returns the formatted configuration error.
 func (str UnsupportedConfigError) Error() string {
 	return fmt.Sprintf("Unsupported Config Type %q", string(str))
-}
-
-// Denotes encountering an unsupported remote
-// provider. Currently only etcd and Consul are
-// supported.
-type UnsupportedRemoteProviderError string
-
-// Returns the formatted remote provider error.
-func (str UnsupportedRemoteProviderError) Error() string {
-	return fmt.Sprintf("Unsupported Remote Provider Type %q", string(str))
-}
-
-// Denotes encountering an error while trying to
-// pull the configuration from the remote provider.
-type RemoteConfigError string
-
-// Returns the formatted remote provider error
-func (rce RemoteConfigError) Error() string {
-	return fmt.Sprintf("Remote Configurations Error: %s", string(rce))
 }
 
 // Denotes failing to find configuration file.
@@ -132,12 +101,6 @@ type Viper struct {
 	// A set of paths to look for the config file in
 	configPaths []string
 
-	// The filesystem to read config from.
-	fs afero.Fs
-
-	// A set of remote providers to search for the configuration
-	remoteProviders []*defaultRemoteProvider
-
 	// Name of file to look for inside the path
 	configName string
 	configFile string
@@ -150,13 +113,10 @@ type Viper struct {
 	config         map[string]interface{}
 	override       map[string]interface{}
 	defaults       map[string]interface{}
-	kvstore        map[string]interface{}
 	pflags         map[string]FlagValue
 	env            map[string]string
 	aliases        map[string]string
 	typeByDefValue bool
-
-	onConfigChange func(fsnotify.Event)
 }
 
 // Returns an initialized Viper instance.
@@ -164,11 +124,9 @@ func New() *Viper {
 	v := new(Viper)
 	v.keyDelim = "."
 	v.configName = "config"
-	v.fs = afero.NewOsFs()
 	v.config = make(map[string]interface{})
 	v.override = make(map[string]interface{})
 	v.defaults = make(map[string]interface{})
-	v.kvstore = make(map[string]interface{})
 	v.pflags = make(map[string]FlagValue)
 	v.env = make(map[string]string)
 	v.aliases = make(map[string]string)
@@ -182,93 +140,11 @@ func New() *Viper {
 // can use it in their testing as well.
 func Reset() {
 	v = New()
-	SupportedExts = []string{"json", "toml", "yaml", "yml", "hcl"}
-	SupportedRemoteProviders = []string{"etcd", "consul"}
-}
-
-type defaultRemoteProvider struct {
-	provider      string
-	endpoint      string
-	path          string
-	secretKeyring string
-}
-
-func (rp defaultRemoteProvider) Provider() string {
-	return rp.provider
-}
-
-func (rp defaultRemoteProvider) Endpoint() string {
-	return rp.endpoint
-}
-
-func (rp defaultRemoteProvider) Path() string {
-	return rp.path
-}
-
-func (rp defaultRemoteProvider) SecretKeyring() string {
-	return rp.secretKeyring
-}
-
-// RemoteProvider stores the configuration necessary
-// to connect to a remote key/value store.
-// Optional secretKeyring to unencrypt encrypted values
-// can be provided.
-type RemoteProvider interface {
-	Provider() string
-	Endpoint() string
-	Path() string
-	SecretKeyring() string
+	SupportedExts = []string{"json", "toml", "yaml", "yml"}
 }
 
 // Universally supported extensions.
-var SupportedExts []string = []string{"json", "toml", "yaml", "yml", "properties", "props", "prop", "hcl"}
-
-// Universally supported remote providers.
-var SupportedRemoteProviders []string = []string{"etcd", "consul"}
-
-func OnConfigChange(run func(in fsnotify.Event)) { v.OnConfigChange(run) }
-func (v *Viper) OnConfigChange(run func(in fsnotify.Event)) {
-	v.onConfigChange = run
-}
-
-func WatchConfig() { v.WatchConfig() }
-func (v *Viper) WatchConfig() {
-	go func() {
-		watcher, err := fsnotify.NewWatcher()
-		if err != nil {
-			log.Fatal(err)
-		}
-		defer watcher.Close()
-
-		// we have to watch the entire directory to pick up renames/atomic saves in a cross-platform way
-		configFile := filepath.Clean(v.getConfigFile())
-		configDir, _ := filepath.Split(configFile)
-
-		done := make(chan bool)
-		go func() {
-			for {
-				select {
-				case event := <-watcher.Events:
-					// we only care about the config file
-					if filepath.Clean(event.Name) == configFile {
-						if event.Op&fsnotify.Write == fsnotify.Write || event.Op&fsnotify.Create == fsnotify.Create {
-							err := v.ReadInConfig()
-							if err != nil {
-								log.Println("error:", err)
-							}
-							v.onConfigChange(event)
-						}
-					}
-				case err := <-watcher.Errors:
-					log.Println("error:", err)
-				}
-			}
-		}()
-
-		watcher.Add(configDir)
-		<-done
-	}()
-}
+var SupportedExts []string = []string{"json", "toml", "yaml", "yml"}
 
 // Explicitly define the path, name and extension of the config file
 // Viper will use this and not check any of the config paths
@@ -321,82 +197,10 @@ func AddConfigPath(in string) { v.AddConfigPath(in) }
 func (v *Viper) AddConfigPath(in string) {
 	if in != "" {
 		absin := absPathify(in)
-		jww.INFO.Println("adding", absin, "to paths to search")
 		if !stringInSlice(absin, v.configPaths) {
 			v.configPaths = append(v.configPaths, absin)
 		}
 	}
-}
-
-// AddRemoteProvider adds a remote configuration source.
-// Remote Providers are searched in the order they are added.
-// provider is a string value, "etcd" or "consul" are currently supported.
-// endpoint is the url.  etcd requires http://ip:port  consul requires ip:port
-// path is the path in the k/v store to retrieve configuration
-// To retrieve a config file called myapp.json from /configs/myapp.json
-// you should set path to /configs and set config name (SetConfigName()) to
-// "myapp"
-func AddRemoteProvider(provider, endpoint, path string) error {
-	return v.AddRemoteProvider(provider, endpoint, path)
-}
-func (v *Viper) AddRemoteProvider(provider, endpoint, path string) error {
-	if !stringInSlice(provider, SupportedRemoteProviders) {
-		return UnsupportedRemoteProviderError(provider)
-	}
-	if provider != "" && endpoint != "" {
-		jww.INFO.Printf("adding %s:%s to remote provider list", provider, endpoint)
-		rp := &defaultRemoteProvider{
-			endpoint: endpoint,
-			provider: provider,
-			path:     path,
-		}
-		if !v.providerPathExists(rp) {
-			v.remoteProviders = append(v.remoteProviders, rp)
-		}
-	}
-	return nil
-}
-
-// AddSecureRemoteProvider adds a remote configuration source.
-// Secure Remote Providers are searched in the order they are added.
-// provider is a string value, "etcd" or "consul" are currently supported.
-// endpoint is the url.  etcd requires http://ip:port  consul requires ip:port
-// secretkeyring is the filepath to your openpgp secret keyring.  e.g. /etc/secrets/myring.gpg
-// path is the path in the k/v store to retrieve configuration
-// To retrieve a config file called myapp.json from /configs/myapp.json
-// you should set path to /configs and set config name (SetConfigName()) to
-// "myapp"
-// Secure Remote Providers are implemented with github.com/xordataexchange/crypt
-func AddSecureRemoteProvider(provider, endpoint, path, secretkeyring string) error {
-	return v.AddSecureRemoteProvider(provider, endpoint, path, secretkeyring)
-}
-
-func (v *Viper) AddSecureRemoteProvider(provider, endpoint, path, secretkeyring string) error {
-	if !stringInSlice(provider, SupportedRemoteProviders) {
-		return UnsupportedRemoteProviderError(provider)
-	}
-	if provider != "" && endpoint != "" {
-		jww.INFO.Printf("adding %s:%s to remote provider list", provider, endpoint)
-		rp := &defaultRemoteProvider{
-			endpoint:      endpoint,
-			provider:      provider,
-			path:          path,
-			secretKeyring: secretkeyring,
-		}
-		if !v.providerPathExists(rp) {
-			v.remoteProviders = append(v.remoteProviders, rp)
-		}
-	}
-	return nil
-}
-
-func (v *Viper) providerPathExists(p *defaultRemoteProvider) bool {
-	for _, y := range v.remoteProviders {
-		if reflect.DeepEqual(y, p) {
-			return true
-		}
-	}
-	return false
 }
 
 func (v *Viper) searchMap(source map[string]interface{}, path []string) interface{} {
@@ -482,7 +286,6 @@ func (v *Viper) Get(key string) interface{} {
 	// get the flag's value even if the flag's value has not changed
 	if val == nil {
 		if flag, exists := v.pflags[lcaseKey]; exists {
-			jww.TRACE.Println(key, "get pflag default", val)
 			switch flag.ValueType() {
 			case "int", "int8", "int16", "int32", "int64":
 				val = cast.ToInt(flag.ValueString())
@@ -751,7 +554,6 @@ func (v *Viper) find(key string) interface{} {
 	// PFlag Override first
 	flag, exists := v.pflags[key]
 	if exists && flag.HasChanged() {
-		jww.TRACE.Println(key, "found in override (via pflag):", flag.ValueString())
 		switch flag.ValueType() {
 		case "int", "int8", "int16", "int32", "int64":
 			return cast.ToInt(flag.ValueString())
@@ -764,7 +566,6 @@ func (v *Viper) find(key string) interface{} {
 
 	val, exists = v.override[key]
 	if exists {
-		jww.TRACE.Println(key, "found in override:", val)
 		return val
 	}
 
@@ -772,25 +573,19 @@ func (v *Viper) find(key string) interface{} {
 		// even if it hasn't been registered, if automaticEnv is used,
 		// check any Get request
 		if val = v.getEnv(v.mergeWithEnvPrefix(key)); val != "" {
-			jww.TRACE.Println(key, "found in environment with val:", val)
 			return val
 		}
 	}
 
 	envkey, exists := v.env[key]
 	if exists {
-		jww.TRACE.Println(key, "registered as env var", envkey)
 		if val = v.getEnv(envkey); val != "" {
-			jww.TRACE.Println(envkey, "found in environment with val:", val)
 			return val
-		} else {
-			jww.TRACE.Println(envkey, "env value unset:")
 		}
 	}
 
 	val, exists = v.config[key]
 	if exists {
-		jww.TRACE.Println(key, "found in config:", val)
 		return val
 	}
 
@@ -802,21 +597,13 @@ func (v *Viper) find(key string) interface{} {
 		if source != nil {
 			if reflect.TypeOf(source).Kind() == reflect.Map {
 				val := v.searchMap(cast.ToStringMap(source), path[1:])
-				jww.TRACE.Println(key, "found in nested config:", val)
 				return val
 			}
 		}
 	}
 
-	val, exists = v.kvstore[key]
-	if exists {
-		jww.TRACE.Println(key, "found in key/value store:", val)
-		return val
-	}
-
 	val, exists = v.defaults[key]
 	if exists {
-		jww.TRACE.Println(key, "found in defaults:", val)
 		return val
 	}
 
@@ -878,10 +665,6 @@ func (v *Viper) registerAlias(alias string, key string) {
 				delete(v.config, alias)
 				v.config[key] = val
 			}
-			if val, ok := v.kvstore[alias]; ok {
-				delete(v.kvstore, alias)
-				v.kvstore[key] = val
-			}
 			if val, ok := v.defaults[alias]; ok {
 				delete(v.defaults, alias)
 				v.defaults[key] = val
@@ -892,15 +675,12 @@ func (v *Viper) registerAlias(alias string, key string) {
 			}
 			v.aliases[alias] = key
 		}
-	} else {
-		jww.WARN.Println("Creating circular reference alias", alias, key, v.realKey(key))
 	}
 }
 
 func (v *Viper) realKey(key string) string {
 	newkey, exists := v.aliases[key]
 	if exists {
-		jww.DEBUG.Println("Alias", key, "to", newkey)
 		return v.realKey(newkey)
 	} else {
 		return key
@@ -940,12 +720,11 @@ func (v *Viper) Set(key string, value interface{}) {
 // and key/value stores, searching in one of the defined paths.
 func ReadInConfig() error { return v.ReadInConfig() }
 func (v *Viper) ReadInConfig() error {
-	jww.INFO.Println("Attempting to read in config file")
 	if !stringInSlice(v.getConfigType(), SupportedExts) {
 		return UnsupportedConfigError(v.getConfigType())
 	}
 
-	file, err := afero.ReadFile(v.fs, v.getConfigFile())
+	file, err := ioutil.ReadFile(v.getConfigFile())
 	if err != nil {
 		return err
 	}
@@ -958,12 +737,11 @@ func (v *Viper) ReadInConfig() error {
 // MergeInConfig merges a new configuration with an existing config.
 func MergeInConfig() error { return v.MergeInConfig() }
 func (v *Viper) MergeInConfig() error {
-	jww.INFO.Println("Attempting to merge in config file")
 	if !stringInSlice(v.getConfigType(), SupportedExts) {
 		return UnsupportedConfigError(v.getConfigType())
 	}
 
-	file, err := afero.ReadFile(v.fs, v.getConfigFile())
+	file, err := ioutil.ReadFile(v.getConfigFile())
 	if err != nil {
 		return err
 	}
@@ -1023,7 +801,6 @@ func mergeMaps(
 	for sk, sv := range src {
 		tk := keyExists(sk, tgt)
 		if tk == "" {
-			jww.TRACE.Printf("tk=\"\", tgt[%s]=%v", sk, sv)
 			tgt[sk] = sv
 			if itgt != nil {
 				itgt[sk] = sv
@@ -1033,7 +810,6 @@ func mergeMaps(
 
 		tv, ok := tgt[tk]
 		if !ok {
-			jww.TRACE.Printf("tgt[%s] != ok, tgt[%s]=%v", tk, sk, sv)
 			tgt[sk] = sv
 			if itgt != nil {
 				itgt[sk] = sv
@@ -1044,59 +820,24 @@ func mergeMaps(
 		svType := reflect.TypeOf(sv)
 		tvType := reflect.TypeOf(tv)
 		if svType != tvType {
-			jww.ERROR.Printf(
-				"svType != tvType; key=%s, st=%v, tt=%v, sv=%v, tv=%v",
-				sk, svType, tvType, sv, tv)
 			continue
 		}
 
-		jww.TRACE.Printf("processing key=%s, st=%v, tt=%v, sv=%v, tv=%v",
-			sk, svType, tvType, sv, tv)
-
 		switch ttv := tv.(type) {
 		case map[interface{}]interface{}:
-			jww.TRACE.Printf("merging maps (must convert)")
 			tsv := sv.(map[interface{}]interface{})
 			ssv := castToMapStringInterface(tsv)
 			stv := castToMapStringInterface(ttv)
 			mergeMaps(ssv, stv, ttv)
 		case map[string]interface{}:
-			jww.TRACE.Printf("merging maps")
 			mergeMaps(sv.(map[string]interface{}), ttv, nil)
 		default:
-			jww.TRACE.Printf("setting value")
 			tgt[tk] = sv
 			if itgt != nil {
 				itgt[tk] = sv
 			}
 		}
 	}
-}
-
-// func ReadBufConfig(buf *bytes.Buffer) error { return v.ReadBufConfig(buf) }
-// func (v *Viper) ReadBufConfig(buf *bytes.Buffer) error {
-// 	v.config = make(map[string]interface{})
-// 	return v.unmarshalReader(buf, v.config)
-// }
-
-// Attempts to get configuration from a remote source
-// and read it in the remote configuration registry.
-func ReadRemoteConfig() error { return v.ReadRemoteConfig() }
-func (v *Viper) ReadRemoteConfig() error {
-	err := v.getKeyValueConfig()
-	if err != nil {
-		return err
-	}
-	return nil
-}
-
-func WatchRemoteConfig() error { return v.WatchRemoteConfig() }
-func (v *Viper) WatchRemoteConfig() error {
-	err := v.watchKeyValueConfig()
-	if err != nil {
-		return err
-	}
-	return nil
 }
 
 // Unmarshall a Reader into a map
@@ -1113,56 +854,6 @@ func (v *Viper) insensitiviseMaps() {
 	insensitiviseMap(v.config)
 	insensitiviseMap(v.defaults)
 	insensitiviseMap(v.override)
-	insensitiviseMap(v.kvstore)
-}
-
-// retrieve the first found remote configuration
-func (v *Viper) getKeyValueConfig() error {
-	if RemoteConfig == nil {
-		return RemoteConfigError("Enable the remote features by doing a blank import of the viper/remote package: '_ github.com/spf13/viper/remote'")
-	}
-
-	for _, rp := range v.remoteProviders {
-		val, err := v.getRemoteConfig(rp)
-		if err != nil {
-			continue
-		}
-		v.kvstore = val
-		return nil
-	}
-	return RemoteConfigError("No Files Found")
-}
-
-func (v *Viper) getRemoteConfig(provider *defaultRemoteProvider) (map[string]interface{}, error) {
-
-	reader, err := RemoteConfig.Get(provider)
-	if err != nil {
-		return nil, err
-	}
-	err = v.unmarshalReader(reader, v.kvstore)
-	return v.kvstore, err
-}
-
-// retrieve the first found remote configuration
-func (v *Viper) watchKeyValueConfig() error {
-	for _, rp := range v.remoteProviders {
-		val, err := v.watchRemoteConfig(rp)
-		if err != nil {
-			continue
-		}
-		v.kvstore = val
-		return nil
-	}
-	return RemoteConfigError("No Files Found")
-}
-
-func (v *Viper) watchRemoteConfig(provider *defaultRemoteProvider) (map[string]interface{}, error) {
-	reader, err := RemoteConfig.Watch(provider)
-	if err != nil {
-		return nil, err
-	}
-	err = v.unmarshalReader(reader, v.kvstore)
-	return v.kvstore, err
 }
 
 // Return all keys regardless where they are set
@@ -1183,10 +874,6 @@ func (v *Viper) AllKeys() []string {
 	}
 
 	for key, _ := range v.config {
-		m[strings.ToLower(key)] = struct{}{}
-	}
-
-	for key, _ := range v.kvstore {
 		m[strings.ToLower(key)] = struct{}{}
 	}
 
@@ -1215,12 +902,6 @@ func (v *Viper) AllSettings() map[string]interface{} {
 	}
 
 	return m
-}
-
-// Se the filesystem to use to read configuration.
-func SetFs(fs afero.Fs) { v.SetFs(fs) }
-func (v *Viper) SetFs(fs afero.Fs) {
-	v.fs = fs
 }
 
 // Name for the config file.
@@ -1273,11 +954,8 @@ func (v *Viper) getConfigFile() string {
 }
 
 func (v *Viper) searchInPath(in string) (filename string) {
-	jww.DEBUG.Println("Searching for config in ", in)
 	for _, ext := range SupportedExts {
-		jww.DEBUG.Println("Checking for", filepath.Join(in, v.configName+"."+ext))
 		if b, _ := exists(filepath.Join(in, v.configName+"."+ext)); b {
-			jww.DEBUG.Println("Found: ", filepath.Join(in, v.configName+"."+ext))
 			return filepath.Join(in, v.configName+"."+ext)
 		}
 	}
@@ -1288,9 +966,6 @@ func (v *Viper) searchInPath(in string) (filename string) {
 // search all configPaths for any config file.
 // Returns the first path that exists (and is a config file)
 func (v *Viper) findConfigFile() (string, error) {
-
-	jww.INFO.Println("Searching for config in ", v.configPaths)
-
 	for _, cp := range v.configPaths {
 		file := v.searchInPath(cp)
 		if file != "" {
@@ -1309,7 +984,6 @@ func (v *Viper) Debug() {
 	fmt.Printf("Override:\n%#v\n", v.override)
 	fmt.Printf("PFlags:\n%#v\n", v.pflags)
 	fmt.Printf("Env:\n%#v\n", v.env)
-	fmt.Printf("Key/Value Store:\n%#v\n", v.kvstore)
 	fmt.Printf("Config:\n%#v\n", v.config)
 	fmt.Printf("Defaults:\n%#v\n", v.defaults)
 }

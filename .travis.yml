@@ -1,8 +1,7 @@
-go_import_path: github.com/spf13/viper
+go_import_path: github.com/FZambia/viper-lite
 
 language: go
 go:
-  - 1.5.4
   - 1.6.3
   - 1.7
   - tip
@@ -19,9 +18,5 @@ matrix:
 script:
   - go install ./...
   - go test -v ./...
-
-after_success:
-  - go get -u -d github.com/spf13/hugo
-  - cd $GOPATH/src/github.com/spf13/hugo && make && ./hugo -s docs && cd -
 
 sudo: false

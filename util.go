@@ -21,11 +21,9 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/hashicorp/hcl"
-	"github.com/magiconair/properties"
-	toml "github.com/pelletier/go-toml"
 	"github.com/spf13/cast"
-	jww "github.com/spf13/jwalterweatherman"
+
+	"github.com/pelletier/go-toml"
 	"gopkg.in/yaml.v2"
 )
 
@@ -50,7 +48,6 @@ func insensitiviseMap(m map[string]interface{}) {
 }
 
 func absPathify(inPath string) string {
-	jww.INFO.Println("Trying to resolve absolute path to", inPath)
 
 	if strings.HasPrefix(inPath, "$HOME") {
 		inPath = userHomeDir() + inPath[5:]
@@ -68,16 +65,13 @@ func absPathify(inPath string) string {
 	p, err := filepath.Abs(inPath)
 	if err == nil {
 		return filepath.Clean(p)
-	} else {
-		jww.ERROR.Println("Couldn't discover absolute path")
-		jww.ERROR.Println(err)
 	}
 	return ""
 }
 
 // Check if File / Directory Exists
 func exists(path string) (bool, error) {
-	_, err := v.fs.Stat(path)
+	_, err := os.Stat(path)
 	if err == nil {
 		return true, nil
 	}
@@ -145,15 +139,6 @@ func unmarshallConfigReader(in io.Reader, c map[string]interface{}, configType s
 			return ConfigParseError{err}
 		}
 
-	case "hcl":
-		obj, err := hcl.Parse(string(buf.Bytes()))
-		if err != nil {
-			return ConfigParseError{err}
-		}
-		if err = hcl.DecodeObject(&c, obj); err != nil {
-			return ConfigParseError{err}
-		}
-
 	case "toml":
 		tree, err := toml.LoadReader(buf)
 		if err != nil {
@@ -162,17 +147,6 @@ func unmarshallConfigReader(in io.Reader, c map[string]interface{}, configType s
 		tmap := tree.ToMap()
 		for k, v := range tmap {
 			c[k] = v
-		}
-
-	case "properties", "props", "prop":
-		var p *properties.Properties
-		var err error
-		if p, err = properties.Load(buf.Bytes(), properties.UTF8); err != nil {
-			return ConfigParseError{err}
-		}
-		for _, key := range p.Keys() {
-			value, _ := p.Get(key)
-			c[key] = value
 		}
 	}
 
