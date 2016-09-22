@@ -21,9 +21,9 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/spf13/cast"
-  jww "github.com/spf13/jwalterweatherman"
 	"github.com/pelletier/go-toml"
+	"github.com/spf13/cast"
+	jww "github.com/spf13/jwalterweatherman"
 	"gopkg.in/yaml.v2"
 )
 
