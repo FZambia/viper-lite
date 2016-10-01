@@ -402,10 +402,12 @@ func TestRecursiveAliases(t *testing.T) {
 func TestUnmarshal(t *testing.T) {
 	SetDefault("port", 1313)
 	Set("name", "Steve")
+	Set("duration", "1s1ms")
 
 	type config struct {
-		Port int
-		Name string
+		Port     int
+		Name     string
+		Duration time.Duration
 	}
 
 	var C config
@@ -415,14 +417,14 @@ func TestUnmarshal(t *testing.T) {
 		t.Fatalf("unable to decode into struct, %v", err)
 	}
 
-	assert.Equal(t, &C, &config{Name: "Steve", Port: 1313})
+	assert.Equal(t, &C, &config{Name: "Steve", Port: 1313, Duration: time.Second + time.Millisecond})
 
 	Set("port", 1234)
 	err = Unmarshal(&C)
 	if err != nil {
 		t.Fatalf("unable to decode into struct, %v", err)
 	}
-	assert.Equal(t, &C, &config{Name: "Steve", Port: 1234})
+	assert.Equal(t, &C, &config{Name: "Steve", Port: 1234, Duration: time.Second + time.Millisecond})
 }
 
 func TestBindPFlags(t *testing.T) {
@@ -844,4 +846,41 @@ func TestShadowedNestedValue(t *testing.T) {
 
 	assert.Equal(t, GetString("clothing.jacket"), "leather")
 	assert.Equal(t, GetString("clothing.shirt"), polyester)
+}
+
+func TestGetBool(t *testing.T) {
+	key := "BooleanKey"
+	v = New()
+	v.Set(key, true)
+	if !v.GetBool(key) {
+		t.Fatal("GetBool returned false")
+	}
+	if v.GetBool("NotFound") {
+		t.Fatal("GetBool returned true")
+	}
+}
+
+func BenchmarkGetBool(b *testing.B) {
+	key := "BenchmarkGetBool"
+	v = New()
+	v.Set(key, true)
+
+	for i := 0; i < b.N; i++ {
+		if !v.GetBool(key) {
+			b.Fatal("GetBool returned false")
+		}
+	}
+}
+
+// This is the "perfect result" for the above.
+func BenchmarkGetBoolFromMap(b *testing.B) {
+	m := make(map[string]bool)
+	key := "BenchmarkGetBool"
+	m[key] = true
+
+	for i := 0; i < b.N; i++ {
+		if !m[key] {
+			b.Fatal("Map value was false")
+		}
+	}
 }
